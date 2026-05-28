@@ -158,6 +158,16 @@ struct CreateSubscriberBody {
     secret: Option<String>,
 }
 
+/// Redact the secret field from a subscriber for API responses.
+fn redact_secret(mut v: Value) -> Value {
+    if let Some(obj) = v.as_object_mut() {
+        if obj.contains_key("secret") {
+            obj.remove("secret");
+        }
+    }
+    v
+}
+
 async fn create_subscriber(
     State(state): State<S>,
     Json(body): Json<CreateSubscriberBody>,
@@ -166,12 +176,16 @@ async fn create_subscriber(
         .subscriber_store
         .add(body.url, body.events, body.platforms, body.secret)
         .await;
-    (StatusCode::CREATED, Json(serde_json::to_value(sub).unwrap()))
+    (StatusCode::CREATED, Json(redact_secret(serde_json::to_value(sub).unwrap())))
 }
 
 async fn list_subscribers(State(state): State<S>) -> Json<Value> {
     let subs = state.subscriber_store.list().await;
-    Json(serde_json::to_value(subs).unwrap())
+    let redacted: Vec<Value> = subs
+        .into_iter()
+        .map(|s| redact_secret(serde_json::to_value(s).unwrap()))
+        .collect();
+    Json(serde_json::to_value(redacted).unwrap())
 }
 
 async fn delete_subscriber(

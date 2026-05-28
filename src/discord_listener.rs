@@ -34,19 +34,31 @@ impl EventHandler for DiscordHandler {
         }
     }
 
-    async fn reaction_add(&self, _ctx: Context, reaction: Reaction) {
+    async fn reaction_add(&self, ctx: Context, reaction: Reaction) {
         let emoji_str = reaction.emoji.to_string();
+
+        // Try to resolve user info to detect bots
+        let author = if let Some(uid) = reaction.user_id {
+            let (username, is_bot) = match uid.to_user(&ctx).await {
+                Ok(user) => (user.name.clone(), user.bot),
+                Err(_) => (String::new(), false),
+            };
+            Some(EventAuthor {
+                id: uid.to_string(),
+                username,
+                display_name: None,
+                is_bot,
+            })
+        } else {
+            None
+        };
+
         let event = GatewayEvent {
             id: uuid::Uuid::new_v4().to_string(),
             platform: "discord".into(),
             event_type: "reaction_add".into(),
             channel_id: Some(reaction.channel_id.to_string()),
-            author: reaction.user_id.map(|uid| EventAuthor {
-                id: uid.to_string(),
-                username: String::new(),
-                display_name: None,
-                is_bot: false,
-            }),
+            author,
             content: Some(emoji_str),
             timestamp: chrono::Utc::now().to_rfc3339(),
             raw: serde_json::to_value(&reaction).unwrap_or_default(),
@@ -62,19 +74,35 @@ impl EventHandler for DiscordHandler {
     }
 }
 
-/// Start the serenity client for inbound Discord events.
-/// This function blocks until the client disconnects — call via `tokio::spawn`.
+/// Start the serenity client for inbound Discord events with auto-reconnect.
+/// This function blocks indefinitely — call via `tokio::spawn`.
 pub async fn start(token: String, event_tx: broadcast::Sender<GatewayEvent>) {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
-    let mut client = Client::builder(&token, intents)
-        .event_handler(DiscordHandler { event_tx })
-        .await
-        .expect("Failed to create Discord listener client");
+    loop {
+        let mut client = match Client::builder(&token, intents)
+            .event_handler(DiscordHandler {
+                event_tx: event_tx.clone(),
+            })
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to create Discord listener client: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        };
 
-    if let Err(e) = client.start().await {
-        tracing::error!("Discord listener error: {e}");
+        tracing::info!("Starting Discord listener...");
+        if let Err(e) = client.start().await {
+            tracing::error!("Discord listener disconnected: {e}, reconnecting in 10s...");
+        } else {
+            tracing::warn!("Discord listener stopped unexpectedly, reconnecting in 10s...");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }

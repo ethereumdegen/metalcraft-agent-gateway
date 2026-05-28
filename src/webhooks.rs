@@ -28,8 +28,42 @@ pub fn router() -> Router<S> {
 
 async fn slack_webhook(
     State(state): State<S>,
-    Json(body): Json<Value>,
+    headers: HeaderMap,
+    raw_body: Bytes,
 ) -> impl IntoResponse {
+    // Verify Slack signature if signing secret is configured
+    if let Ok(signing_secret) = std::env::var("SLACK_SIGNING_SECRET") {
+        if !signing_secret.is_empty() {
+            let timestamp = headers
+                .get("x-slack-request-timestamp")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            let signature = headers
+                .get("x-slack-signature")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+
+            if !verify_slack_signature(&signing_secret, timestamp, &raw_body, signature) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "Invalid signature" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let body: Value = match serde_json::from_slice(&raw_body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid JSON" })),
+            )
+                .into_response();
+        }
+    };
+
     // Handle url_verification challenge
     if body.get("type").and_then(|t| t.as_str()) == Some("url_verification") {
         let challenge = body
@@ -59,14 +93,23 @@ async fn slack_webhook(
         let user_id = event.get("user").and_then(|u| u.as_str()).map(String::from);
 
         let author = user_id.map(|uid| EventAuthor {
-            id: uid,
-            username: String::new(),
+            id: uid.clone(),
+            username: uid,
             display_name: None,
-            is_bot: event
-                .get("bot_id")
-                .map(|_| true)
-                .unwrap_or(false),
+            is_bot: event.get("bot_id").is_some(),
         });
+
+        // Convert Slack epoch timestamp to RFC 3339
+        let timestamp = event
+            .get("ts")
+            .and_then(|t| t.as_str())
+            .and_then(|ts| {
+                ts.split('.').next()
+                    .and_then(|secs| secs.parse::<i64>().ok())
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+                    .map(|dt| dt.to_rfc3339())
+            })
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
         let gateway_event = GatewayEvent {
             id: uuid::Uuid::new_v4().to_string(),
@@ -75,11 +118,7 @@ async fn slack_webhook(
             channel_id,
             author,
             content: text,
-            timestamp: event
-                .get("ts")
-                .and_then(|t| t.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            timestamp,
             raw: body.clone(),
         };
 
@@ -188,6 +227,25 @@ async fn github_webhook(
     let _ = state.event_tx.send(gateway_event);
 
     (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+fn verify_slack_signature(secret: &str, timestamp: &str, body: &[u8], signature: &str) -> bool {
+    let sig_hex = match signature.strip_prefix("v0=") {
+        Some(hex) => hex,
+        None => return false,
+    };
+
+    let sig_bytes = match hex::decode(sig_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+
+    let basestring = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(basestring.as_bytes());
+
+    mac.verify_slice(&sig_bytes).is_ok()
 }
 
 fn verify_github_signature(secret: &str, body: &[u8], signature: &str) -> bool {
