@@ -1,0 +1,19 @@
+[package]
+name = "metalcraft-agent-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-agnostic messaging gateway for metalcraft-agent. Translates a uniform HTTP API into Discord, Slack, and other platform-specific calls."
+license = "MIT"
+repository = "https://github.com/ethereumdegen/metalcraft-agent-gateway"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+async-trait = "0.1"
