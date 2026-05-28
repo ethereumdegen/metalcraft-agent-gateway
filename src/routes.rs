@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Json,
 };
 use serde::Deserialize;
@@ -29,6 +29,8 @@ pub fn router() -> Router<S> {
             get(get_messages),
         )
         .route("/channels/{channel_id}", get(get_channel_info))
+        .route("/subscribers", post(create_subscriber).get(list_subscribers))
+        .route("/subscribers/{id}", delete(delete_subscriber))
         .layer(middleware::from_fn(auth::require_api_key))
 }
 
@@ -144,4 +146,41 @@ async fn get_channel_info(
         .await
         .map(Json)
         .map_err(platform_err)
+}
+
+// ── Subscriber CRUD ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateSubscriberBody {
+    url: String,
+    events: Vec<String>,
+    platforms: Option<Vec<String>>,
+    secret: Option<String>,
+}
+
+async fn create_subscriber(
+    State(state): State<S>,
+    Json(body): Json<CreateSubscriberBody>,
+) -> impl IntoResponse {
+    let sub = state
+        .subscriber_store
+        .add(body.url, body.events, body.platforms, body.secret)
+        .await;
+    (StatusCode::CREATED, Json(serde_json::to_value(sub).unwrap()))
+}
+
+async fn list_subscribers(State(state): State<S>) -> Json<Value> {
+    let subs = state.subscriber_store.list().await;
+    Json(serde_json::to_value(subs).unwrap())
+}
+
+async fn delete_subscriber(
+    State(state): State<S>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.subscriber_store.remove(&id).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }

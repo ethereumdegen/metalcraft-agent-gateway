@@ -1,15 +1,25 @@
 mod auth;
+mod discord_listener;
+mod events;
 mod platform;
 mod routes;
+mod subscribers;
+mod webhooks;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use axum::Router;
+use tokio::sync::broadcast;
 use tower_http::trace::TraceLayer;
+
+use events::GatewayEvent;
+use subscribers::SubscriberStore;
 
 pub struct AppState {
     pub platforms: HashMap<String, Box<dyn platform::Platform>>,
     pub default_platform: Option<String>,
+    pub event_tx: broadcast::Sender<GatewayEvent>,
+    pub subscriber_store: SubscriberStore,
 }
 
 impl AppState {
@@ -75,13 +85,37 @@ async fn main() {
         tracing::info!("No default platform — requests must include 'platform' field");
     }
 
+    // Set up broadcast channel for pub/sub events.
+    let (event_tx, _) = broadcast::channel::<GatewayEvent>(256);
+
+    // Open SQLite subscriber store.
+    let db_path = std::env::var("GATEWAY_DB_PATH").unwrap_or_else(|_| "./gateway.db".into());
+    let subscriber_store = SubscriberStore::new(&db_path);
+    tracing::info!("Subscriber store opened at {db_path}");
+
+    // Spawn the event dispatcher.
+    let http_client = reqwest::Client::new();
+    subscribers::spawn_dispatcher(event_tx.subscribe(), subscriber_store.clone(), http_client);
+
+    // Spawn Discord listener (serenity websocket) if token is available.
+    if let Ok(token) = std::env::var("DISCORD_BOT_TOKEN") {
+        let tx = event_tx.clone();
+        tokio::spawn(async move {
+            discord_listener::start(token, tx).await;
+        });
+        tracing::info!("Discord event listener spawned");
+    }
+
     let state = Arc::new(AppState {
         platforms,
         default_platform,
+        event_tx,
+        subscriber_store,
     });
 
     let app = Router::new()
         .nest("/api/v1", routes::router())
+        .nest("/api/v1/webhooks", webhooks::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
