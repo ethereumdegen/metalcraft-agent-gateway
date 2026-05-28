@@ -9,6 +9,7 @@ mod webhooks;
 use std::collections::HashMap;
 use std::sync::Arc;
 use axum::Router;
+use axum::routing::get;
 use tokio::sync::broadcast;
 use tower_http::trace::TraceLayer;
 
@@ -96,6 +97,7 @@ async fn main() {
     });
 
     let app = Router::new()
+        .route("/", get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }))
         .nest("/api/v1", routes::router())
         .nest("/api/v1/webhooks", webhooks::router())
         .layer(TraceLayer::new_for_http())
